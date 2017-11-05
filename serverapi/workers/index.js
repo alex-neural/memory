@@ -1,0 +1,1 @@
+const keyWorker = require('./masterGenerateKeys');

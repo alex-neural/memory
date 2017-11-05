@@ -1,122 +1,127 @@
-//  OpenShift sample Node application
-const express = require('express');
-const morgan  = require('morgan');
-const path    = require('path');
-const favicon = require('serve-favicon');
-const Gun     = require('gun');
-const app     = express();
-const levelup = require('levelup');
-const leveldown = require('leveldown');
+const port =
+  process.env.OPENSHIFT_NODEJS_PORT ||
+  process.env.VCAP_APP_PORT ||
+  process.env.PORT ||
+  process.argv[2] ||
+  9000;
+const express = require("express");
+const path = require("path");
+const favicon = require("serve-favicon");
+const Gun = require("gun");
+const app = express();
+const levelup = require("levelup");
+const leveldown = require("leveldown");
+const Primus = require("primus");
 
-require('gun-level');
-const levelDB = levelup('./data/alex2006hw-memory-data/', {
-  db: leveldown,
+const authorize = require("./authorize");
+
+require("gun-level");
+const levelDB = levelup("data/www-db-data", {
+  db: leveldown
 });
-const s3Options = {};
+
+const { api } = require("./serverapi/index");
+const s3Options = ""; // require("./configs/s3");
 const gunPeers = [];
-
-var { port, ip, mongoURL, mongoURLLabel } = require('./configs/environments')
-Object.assign=require('object-assign')
-
-app.engine('html', require('ejs').renderFile);
-app.use(morgan('combined'))
+//const gunPeers = ['https://ut.usertoken.com/gun'];
 app.use(Gun.serve);
 app.use(express.static(__dirname));
-app.use(favicon(path.join(__dirname, 'public/images', 'favicon.ico')))
+app.use(favicon(path.join(__dirname, "public/images", "favicon.ico")));
 
-// var port = process.env.PORT || process.env.OPENSHIFT_NODEJS_PORT || 8080,
-//     ip   = process.env.IP   || process.env.OPENSHIFT_NODEJS_IP || '0.0.0.0',
-//     mongoURL = process.env.OPENSHIFT_MONGODB_DB_URL || process.env.MONGO_URL,
-//     mongoURLLabel = "";
+app.use("*", (req, res) => api(req, res));
+var server = app.listen(port);
 
-// if (mongoURL == null && process.env.DATABASE_SERVICE_NAME) {
-//   var mongoServiceName = process.env.DATABASE_SERVICE_NAME.toUpperCase(),
-//       mongoHost = process.env[mongoServiceName + '_SERVICE_HOST'],
-//       mongoPort = process.env[mongoServiceName + '_SERVICE_PORT'],
-//       mongoDatabase = process.env[mongoServiceName + '_DATABASE'],
-//       mongoPassword = process.env[mongoServiceName + '_PASSWORD']
-//       mongoUser = process.env[mongoServiceName + '_USER'];
+console.log("Server started on port " + port + " with /gun");
 
-//   if (mongoHost && mongoPort && mongoDatabase) {
-//     mongoURLLabel = mongoURL = 'mongodb://';
-//     if (mongoUser && mongoPassword) {
-//       mongoURL += mongoUser + ':' + mongoPassword + '@';
-//     }
-//     // Provide UI label that excludes user id and pw
-//     mongoURLLabel += mongoHost + ':' + mongoPort + '/' + mongoDatabase;
-//     mongoURL += mongoHost + ':' +  mongoPort + '/' + mongoDatabase;
+// var gun = Gun({
+//   level: levelDB,
+//   file: false,
+//   web: server,
+//   s3: s3Options
+// });
+var gun = Gun({
+  level: levelDB,
+  file: false,
+  web: server,
+  s3: s3Options,
+  peers: gunPeers
+});
 
-//   }
-// }
-var db = null,
-    dbDetails = new Object();
+var gunClients = []; // used as a list of connected clients.
+gun.on("out", { get: { "#": { "*": "" } } });
+// gun.on("out", function(msg) {
+//   jsonmsg = JSON.stringify(msg);
+//   console.log("1.Gun out : ", jsonmsg);
+//   gunClients.forEach(function(client) {
+//     client.send(jsonmsg);
+//   });
+//   this.to.next(msg);
+// });
 
-var initDb = function(callback) {
-  if (mongoURL == null) return;
+const primus = new Primus(server);
+// save current in memory primus.js for frontend access
+primus.save(__dirname + "/primus.js");
+//
+// Add the authorization hook.
+//
+primus.authorize(authorize);
 
-  var mongodb = require('mongodb');
-  if (mongodb == null) return;
+//
+// `connection` is only triggered if the authorization succeeded.
+//
+primus.on("connection", function connection(spark) {
+  gunPeers.push(spark);
+  console.log("1.connection : SUCCESS : ", spark.id);
+  const SUCCESS = { type: "authenticated", payload: "success" };
+  spark.write(SUCCESS);
 
-  mongodb.connect(mongoURL, function(err, conn) {
-    if (err) {
-      callback(err);
-      return;
+  spark.on("data", function(msg) {
+    console.log("1.spark on data : ", msg);
+    gunPeers.forEach(peer => {
+      console.log("1.spark on gunPeers : ", msg);
+      peer.send(msg);
+    });
+    msg = JSON.parse(msg);
+    console.log("2.spark data : ", msg);
+    if ("forEach" in msg)
+      msg.forEach(m => {
+        console.log("3.spark data : ", m);
+        gun.on("in", JSON.parse(m));
+      });
+    else {
+      gun.on("in", msg);
     }
-
-    db = conn;
-    dbDetails.databaseName = db.databaseName;
-    dbDetails.url = mongoURLLabel;
-    dbDetails.type = 'MongoDB';
-
-    console.log('Connected to MongoDB at: %s', mongoURL);
   });
-};
 
-app.get('/', function (req, res) {
-  // try to initialize the db on every request if it's not already
-  // initialized.
-  if (!db) {
-    initDb(function(err){});
-  }
-  if (db) {
-    var col = db.collection('counts');
-    // Create a document with request IP and current time of request
-    col.insert({ip: req.ip, date: Date.now()});
-    col.count(function(err, count){
-      res.render('index.html', { pageCountMessage : count, dbInfo: dbDetails });
+  spark.on("message", function(msg) {
+    console.log("1.spark on gunPeers message : ", msg);
+    gunPeers.forEach(peer => {
+      peer.send(msg);
     });
-  } else {
-    res.render('index.html', { pageCountMessage : null});
-  }
-});
+    msg = JSON.parse(msg);
+    console.log("4.spark message : ", msg);
+    if ("forEach" in msg)
+      msg.forEach(m => {
+        console.log("5.spark message : ", m);
+        gun.on("in", JSON.parse(m));
+      });
+    else {
+      gun.on("in", msg);
+    }
+  });
 
-app.get('/pagecount', function (req, res) {
-  // try to initialize the db on every request if it's not already
-  // initialized.
-  if (!db) {
-    initDb(function(err){});
-  }
-  if (db) {
-    db.collection('counts').count(function(err, count ){
-      res.send('{ pageCount: ' + count + '}');
+  spark.on("close", function(reason, desc) {
+    // gunpeers gone.
+    console.log("1.spark on close : ", reason, desc);
+    var i = gunPeers.findIndex(function(p) {
+      return p === connection;
     });
-  } else {
-    res.send('{ pageCount: -1 }');
-  }
+    if (i >= 0) gunPeers.splice(i, 1);
+  });
+
+  spark.on("error", function(error) {
+    console.log("WebSocket Error:", error);
+  });
+
+  return;
 });
-
-// error handling
-app.use(function(err, req, res, next){
-  console.error(err.stack);
-  res.status(500).send('Something bad happened!');
-});
-
-initDb(function(err){
-  console.log('Error connecting to Mongo. Message:\n'+err);
-});
-
-var server = app.listen(port, ip);
-Gun({ level: levelDB, file: false, web: server, s3: s3Options, peers: gunPeers });
-console.log('Server running on http://%s:%s', ip, port);
-
-module.exports = app ;
